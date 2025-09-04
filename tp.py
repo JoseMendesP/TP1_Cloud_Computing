@@ -9,7 +9,7 @@ from typing import Optional, List
 import requests
 from bs4 import BeautifulSoup
 import boto3
-from botocore.exceptions import NoCredentialsError
+from botocore.exceptions import NoCredentialsError, ClientError
 
 @dataclass
 class CreatureData:
@@ -27,7 +27,8 @@ class WebScraper:
         self.logger = logging.getLogger(__name__)
 
     def fetch_page(self, url: str) -> BeautifulSoup:
-        response = self.session.get(url)
+        headers = {"User-Agent": "PokemonScraper/1.0 (+https://github.com/JoseMendesP)"}
+        response = self.session.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         return BeautifulSoup(response.text, "html.parser")
 
@@ -72,7 +73,7 @@ class S3Uploader:
         except NoCredentialsError:
             logging.error("AWS credentials not found!")
             return None
-        except Exception as e:
+        except ClientError as e:
             logging.error(f"Failed to upload {filename} to S3: {e}")
             return None
 
@@ -88,7 +89,7 @@ class DataCollector:
             soup = self.scraper.fetch_page(url)
             info_table = soup.find("table", {"class": re.compile(r"infobox|roundy")})
             if not info_table:
-                return None, []
+                return None, ["unknown"]
             img_tag = info_table.find("img")
             image_url = None
             if img_tag and img_tag.get("src"):
@@ -114,22 +115,38 @@ class DataCollector:
                 if not creature:
                     continue
                 logging.info(f"Processing #{creature.index:04d} {creature.name}")
+
                 image_url, types = self.find_creature_image_and_types(creature.url)
                 if not image_url:
                     logging.warning(f"No image found for {creature.name}")
                     continue
-                prefix = f"images/{types[0]}/"
+
                 ext = os.path.splitext(urlparse(image_url).path)[-1] or ".png"
                 filename = f"{creature.index:04d}_{creature.name}{ext}"
-                try:
-                    headers = {"User-Agent": "Mozilla/5.0"}
-                    image_data = requests.get(image_url, headers=headers).content
-                    s3_url = self.uploader.upload_image(image_data, filename, prefix=prefix)
-                    if s3_url:
-                        logging.info(f"Uploaded to S3: {s3_url}")
-                        count += 1
-                except Exception as e:
-                    logging.error(f"Failed to download {image_url}: {e}")
+
+                headers = {"User-Agent": "Mozilla/5.0"}
+                for poke_type in types:
+                    prefix = f"images/{poke_type}/"
+                    try:
+                        # Retry simple en cas d’échec
+                        for attempt in range(3):
+                            try:
+                                image_data = requests.get(image_url, headers=headers, timeout=10).content
+                                break
+                            except requests.RequestException:
+                                logging.warning(f"Retry {attempt+1}/3 for {creature.name}")
+                                time.sleep(2)
+                        else:
+                            logging.error(f"Failed to download {image_url} after 3 retries")
+                            continue
+
+                        s3_url = self.uploader.upload_image(image_data, filename, prefix=prefix)
+                        if s3_url:
+                            logging.info(f"Uploaded {creature.name} to S3 under {poke_type}: {s3_url}")
+                    except Exception as e:
+                        logging.error(f"Failed to process {creature.name}: {e}")
+
+                count += 1
                 time.sleep(self.scraper.delay)
 
 def main():
