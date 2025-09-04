@@ -66,7 +66,6 @@ class S3Uploader:
                 Bucket=self.bucket_name,
                 Key=s3_key,
                 Body=image_data,
-                ACL="public-read",
                 ContentType=content_type
             )
             return f"https://{self.bucket_name}.s3.amazonaws.com/{s3_key}"
